@@ -36,15 +36,15 @@ class EntropyBot:
         else:
             patterns = score_patterns(candidates, remaining)
 
-        # Count every pattern for every candidate in one bincount by offsetting each row into its own 243 bins
-        offsets = np.arange(len(candidates))[:, None] * 243
-        counts = np.bincount((patterns + offsets).ravel(), minlength=len(candidates) * 243).reshape(-1, 243)
+        # Count each (candidate, pattern) pair that actually occurs. Giving every candidate its own block
+        # of 243 ids lets one np.unique count them all without allocating empty bins for unseen patterns
+        keys = (patterns + np.arange(len(candidates))[:, None] * 243).ravel()
+        unique_keys, counts = np.unique(keys, return_counts=True)
 
-        # Vectorized entropy math: -sum(P * log2(P)), skipping patterns that didn't happen
-        probabilities = counts / len(remaining)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            terms = np.where(counts > 0, probabilities * np.log2(probabilities), 0.0)
-        return -1.0 * terms.sum(axis=1)
+        # Vectorized entropy math: -sum(P * log2(P)) = log2(n) - sum(c * log2(c)) / n
+        n = len(remaining)
+        weighted = np.bincount(unique_keys // 243, weights=counts * np.log2(counts), minlength=len(candidates))
+        return np.log2(n) - weighted / n
 
     def calculate_entropy(self, guess: str) -> float:
         """

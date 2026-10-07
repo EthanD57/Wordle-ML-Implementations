@@ -2,27 +2,24 @@ import json
 import sys
 from pathlib import Path
 from random import choice
-import pickle as pkl
 import argparse
 
 from Utilities.shared_utils import filter_words, score_guess
-from ML import entropy_maximization_bot, random_forest_classifier, random_forest_regressor, deep_q_network, \
-    neural_network_classifier
 import wordle
+
+models = {
+    "entropy_maximization": 1,
+    "random_forest_classifier": 2,
+    "random_forest_regressor": 3,
+    "neural_network_classifier": 4,
+    "deep_q_network": 5
+}
 
 
 def main():
     """
     Headless Wordle bot runner that outputs JSON for web consumption.
     """
-    models = {
-        "entropy_maximization": 1,
-        "random_forest_classifier": 2,
-        "random_forest_regressor": 3,
-        "neural_network_classifier": 4,
-        "deep_q_network": 5
-    }
-
     parser = argparse.ArgumentParser(description="Wordle Bot Runner")
     parser.add_argument('--word', type=str, required=False, default=None, help='The word to guess')
     parser.add_argument('--model', type=str, default='entropy_maximization',
@@ -49,40 +46,45 @@ def main():
             return
 
         game = wordle.Wordle(word_list_path)
-
-        # Get the word (random if not specified)
-        if args.word is None:
-            target_word = choice(game.word_list)
-        elif args.word.lower() not in game.word_list:
-            target_word = choice(game.word_list)
-        else:
-            target_word = args.word
-
-        # Checking the word length is NOT required here because this will NOT allow users
-        # to enter their own chosen words for performance reasons. If the word list doesn't contain
-        # the word sent my the website, it simply picks a random word. This sanitizes input from the website.
-
-        # Run the game
-        model_id = models[args.model]
-        guesses = play_game(game, model_id, target_word)
-
-        # Format response
-        result = {
-            "success": True,
-            "word": target_word,
-            "model": args.model,
-            "guesses": guesses,
-            "won": len(guesses) < 7,  # Won if guessed in < 6 indexed attempts (indexes 0-5)
-            "num_guesses": len(guesses)
-        }
-
-        print(json.dumps(result))
+        print(json.dumps(run_game(game, args.model, args.word)))
 
     except Exception as e:
         print(json.dumps({
             "success": False,
             "error": str(e)
         }))
+
+
+def run_game(game_instance: wordle.Wordle, model_name: str, word: str | None) -> dict:
+    """
+    Play one game and build the JSON-ready result. Also called in-process by wordle_flask_app.
+
+    Args:
+        game_instance: Wordle instance with word list
+        model_name: Key of the models dict
+        word: Target word. Random if None or not in the word list
+
+    Returns:
+        dict: {success, word, model, guesses, won, num_guesses}
+    """
+    # Checking the word length is NOT required here because this will NOT allow users
+    # to enter their own chosen words. If the word list doesn't contain the word sent
+    # by the website, it simply picks a random word. This sanitizes input from the website.
+    if word is None or word.lower() not in game_instance.word_list:
+        target_word = choice(game_instance.word_list)
+    else:
+        target_word = word.lower()
+
+    guesses = play_game(game_instance, models[model_name], target_word)
+
+    return {
+        "success": True,
+        "word": target_word,
+        "model": model_name,
+        "guesses": guesses,
+        "won": guesses[-1]["guess"] == target_word,
+        "num_guesses": len(guesses)
+    }
 
 
 def play_game(game_instance: wordle.Wordle, model: int, word: str) -> list:
@@ -121,19 +123,6 @@ def play_game(game_instance: wordle.Wordle, model: int, word: str) -> list:
     return guesses
 
 
-def load_pattern_table() -> any:
-    """Load pre-computed entropy pattern table for entropy bot."""
-    path = Path("ML/saved_models/pattern_table.pkl")
-
-    if path.exists():
-        with open(path, 'rb') as f:
-            return pkl.load(f)
-    else:
-        raise FileNotFoundError(
-            "Pattern table not found. Run entropy bot training first."
-        )
-
-
 def initialize_bot(game_instance: wordle.Wordle, model: int = 1):
     """
     Initialize the appropriate bot based on model ID.
@@ -145,24 +134,28 @@ def initialize_bot(game_instance: wordle.Wordle, model: int = 1):
     Returns:
         Initialized bot instance
     """
+    # Imported lazily so the entropy bot can run without loading torch/sklearn
     if model == 1:
-        return entropy_maximization_bot.EntropyBot(
-            game_instance.word_list,
-            load_pattern_table()
-        )
+        from ML import entropy_maximization_bot
+        # No pattern table: scores are computed on the fly against the remaining words
+        return entropy_maximization_bot.EntropyBot(game_instance.word_list)
     elif model == 2:
+        from ML import random_forest_classifier
         bot = random_forest_classifier.RandomForestClassifierModel(game_instance.word_list)
         bot.train()
         return bot
     elif model == 3:
+        from ML import random_forest_regressor
         bot = random_forest_regressor.RandomForestRegressorModel(game_instance.word_list)
         bot.train()
         return bot
     elif model == 4:
+        from ML import neural_network_classifier
         bot = neural_network_classifier.NeuralNetworkClassifier(game_instance.word_list)
         bot.train()
         return bot
     elif model == 5:
+        from ML import deep_q_network
         bot = deep_q_network.DQNBot(game_instance.word_list)
         bot.train()
         return bot
