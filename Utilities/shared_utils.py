@@ -71,6 +71,53 @@ def score_guess(correct_word: str, guess: str) -> list[int]:
     return result
 
 
+def score_patterns(guesses: list[str], answers: list[str]) -> np.ndarray:
+    """
+    Vectorized version of score_guess for every (guess, answer) pair at once.
+
+    Encodes each score as a base-3 integer in [0, 242] (position 0 is the most significant
+    digit), matching the values stored in the pattern table. This lets the entropy bot score
+    words on the fly, so it doesn't need the pattern table or for words to be in the word list.
+
+    Duplicate letters follow the same rules as score_guess: a non-green guess letter is yellow
+    only if fewer earlier non-green copies of it exist in the guess than there are unmatched
+    copies left in the answer.
+
+    Args:
+        guesses (list[str]): G guess words
+        answers (list[str]): A answer words
+
+    Returns:
+        np.ndarray: (G, A) uint8 array of encoded scores
+
+    """
+    g_all = np.frombuffer("".join(guesses).encode(), dtype=np.uint8).reshape(-1, 5)
+    a = np.frombuffer("".join(answers).encode(), dtype=np.uint8).reshape(-1, 5)
+    patterns = np.zeros((len(g_all), len(a)), dtype=np.uint8)
+
+    # Work through the guesses in chunks so memory stays around 1M (guess, answer) pairs at a time
+    chunk_size = max(1, 1_000_000 // max(1, len(a)))
+    for start in range(0, len(g_all), chunk_size):
+        g = g_all[start:start + chunk_size]
+        green = g[:, None, :] == a[None, :, :]  # (G, A, 5)
+        unmatched_answer = ~green  # Answer positions not consumed by a green
+        chunk = patterns[start:start + chunk_size]
+
+        for i in range(5):
+            letter = g[:, i][:, None, None]  # (G, 1, 1)
+
+            # Copies of this letter still available in the answer after greens are removed
+            available = ((a[None, :, :] == letter) & unmatched_answer).sum(axis=2, dtype=np.uint8)
+
+            # Earlier non-green copies of this letter in the guess have already claimed some of them
+            earlier = ((g[:, None, :i] == letter) & unmatched_answer[:, :, :i]).sum(axis=2, dtype=np.uint8)
+
+            yellow = ~green[:, :, i] & (earlier < available)
+            chunk += np.uint8(3 ** (4 - i)) * (green[:, :, i].astype(np.uint8) * 2 + yellow)
+
+    return patterns
+
+
 def filter_words(guess: str, result: list[int], game_state: GameState):
     """
     Filters the words based off the score response from the game.
