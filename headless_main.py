@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from random import choice
 import argparse
+import re
 
 from Utilities.shared_utils import filter_words, score_guess
 import wordle
@@ -61,23 +62,38 @@ def run_game(game_instance: wordle.Wordle, model_name: str, word: str | None) ->
     """
     Play one game and build the JSON-ready result. Also called in-process by wordle_flask_app.
 
+    Words that aren't in the word list are added to a copy of it for this game, since every model
+    except the DQN picks guesses from whatever word list it's given. The DQN has one network output
+    per vocabulary word, so it can't take new words and gets a random word instead.
+
     Args:
-        game_instance: Wordle instance with word list
+        game_instance: Wordle instance with word list (never modified)
         model_name: Key of the models dict
-        word: Target word. Random if None or not in the word list
+        word: Target word. Random if None or empty
 
     Returns:
-        dict: {success, word, model, guesses, won, num_guesses}
+        dict: {success, word, model, guesses, won, num_guesses, note}
     """
-    # Checking the word length is NOT required here because this will NOT allow users
-    # to enter their own chosen words. If the word list doesn't contain the word sent
-    # by the website, it simply picks a random word. This sanitizes input from the website.
-    if word is None or word.lower() not in game_instance.word_list:
-        target_word = choice(game_instance.word_list)
-    else:
-        target_word = word.lower()
+    word = (word or "").strip().lower()
+    if word and not re.fullmatch(r"[a-z]{5}", word):
+        return {"success": False, "error": "Word must be 5 letters (A-Z)"}
 
-    guesses = play_game(game_instance, models[model_name], target_word)
+    word_list = list(game_instance.word_list)
+    note = None
+
+    if not word:
+        target_word = choice(word_list)
+    elif word in word_list:
+        target_word = word
+    elif model_name == "deep_q_network":
+        target_word = choice(word_list)
+        note = "The DQN can only play words from its vocabulary, so a random word was picked."
+    else:
+        word_list.append(word)
+        target_word = word
+        note = f"{word.upper()} isn't in the bot's word list, so it was added for this game."
+
+    guesses = play_game(word_list, models[model_name], target_word)
 
     return {
         "success": True,
@@ -85,23 +101,24 @@ def run_game(game_instance: wordle.Wordle, model_name: str, word: str | None) ->
         "model": model_name,
         "guesses": guesses,
         "won": guesses[-1]["guess"] == target_word,
-        "num_guesses": len(guesses)
+        "num_guesses": len(guesses),
+        "note": note
     }
 
 
-def play_game(game_instance: wordle.Wordle, model: int, word: str) -> list:
+def play_game(word_list: list[str], model: int, word: str) -> list:
     """
     Run a single Wordle game.
 
     Args:
-        game_instance: Wordle instance with word list
+        word_list: Words the bot can guess (must contain the target word)
         model: Model ID (1-5)
         word: Target word to guess
 
     Returns:
         List of guesses with scores
     """
-    bot = initialize_bot(game_instance, model)
+    bot = initialize_bot(word_list, model)
 
     guess_count = 0
     guesses = []
@@ -125,12 +142,12 @@ def play_game(game_instance: wordle.Wordle, model: int, word: str) -> list:
     return guesses
 
 
-def initialize_bot(game_instance: wordle.Wordle, model: int = 1):
+def initialize_bot(word_list: list[str], model: int = 1):
     """
     Initialize the appropriate bot based on model ID.
 
     Args:
-        game_instance: Wordle instance
+        word_list: Words the bot can guess
         model: Model ID (1-5)
 
     Returns:
@@ -140,25 +157,25 @@ def initialize_bot(game_instance: wordle.Wordle, model: int = 1):
     if model == 1:
         from ML import entropy_maximization_bot
         # No pattern table: scores are computed on the fly against the remaining words
-        return entropy_maximization_bot.EntropyBot(game_instance.word_list)
+        return entropy_maximization_bot.EntropyBot(word_list)
     elif model == 2:
         from ML import random_forest_classifier
-        bot = random_forest_classifier.RandomForestClassifierModel(game_instance.word_list)
+        bot = random_forest_classifier.RandomForestClassifierModel(word_list)
         bot.train()
         return bot
     elif model == 3:
         from ML import random_forest_regressor
-        bot = random_forest_regressor.RandomForestRegressorModel(game_instance.word_list)
+        bot = random_forest_regressor.RandomForestRegressorModel(word_list)
         bot.train()
         return bot
     elif model == 4:
         from ML import neural_network_classifier
-        bot = neural_network_classifier.NeuralNetworkClassifier(game_instance.word_list)
+        bot = neural_network_classifier.NeuralNetworkClassifier(word_list)
         bot.train()
         return bot
     elif model == 5:
         from ML import deep_q_network
-        bot = deep_q_network.DQNBot(game_instance.word_list)
+        bot = deep_q_network.DQNBot(word_list)
         bot.train()
         return bot
     else:
