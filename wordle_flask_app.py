@@ -55,7 +55,8 @@ def play_game():
         # The entropy bot is light enough to run in-process. The ML models stay in a subprocess
         # so torch/sklearn never sit in the gunicorn workers' memory between requests
         if model == 'entropy_maximization':
-            return jsonify(headless_main.run_game(GAME, model, word)), 200
+            result = headless_main.run_game(GAME, model, word)
+            return jsonify(result), 200 if result["success"] else 400
 
         cmd = ['python', 'headless_main.py', '--model', model]
 
